@@ -26,7 +26,7 @@ when given.
 
 from dataclasses import dataclass
 
-from src.utils import log
+from src.utils import log, die
 
 
 @dataclass
@@ -48,6 +48,22 @@ _LEGACY_FALLBACK = RuntimeConfig(
 
 
 def resolve_runtime_config(metadata: dict, args) -> RuntimeConfig:
+    # Hard stop for export-pipeline test artifacts. A --self_test export contains
+    # RANDOM (untrained) weights: for reconstruction-based models the anomaly map
+    # saturates near-uniformly (all-red heatmap) and the max score is essentially
+    # the same ~1 value for every image. Those outputs look exactly like a subtle
+    # inference bug, so refusing here saves a debugging session.
+    if metadata.get("weights_source") == "random_self_test":
+        die(
+            "This ONNX file was exported with --self_test and contains RANDOM "
+            "(untrained) weights - it exists only to test the export pipeline and "
+            "cannot produce meaningful anomaly maps or scores.\n"
+            "Re-export from your trained checkpoint WITHOUT --self_test, e.g.:\n"
+            "  python export_onnx_from_checkpoint.py <checkpoint.pth> <output_dir>"
+        )
+    if "weights_source" in metadata:
+        log(f"Model weights source: {metadata['weights_source']}")
+
     has_metadata = "anomaly_export_contract" in metadata
 
     if not has_metadata:
