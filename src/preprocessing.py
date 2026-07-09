@@ -9,6 +9,19 @@ The exact preprocessing required depends on how the ONNX model was exported:
 Since both variants exist across export scripts used in this project, the Preprocessor
 inspects the ONNX model's input dtype at runtime and automatically selects the matching
 mode, logging the decision so it is always visible which one was used for a given run.
+
+Resize / anti-aliasing
+-----------------------
+All training pipelines (SuperSimpleNet's ``F.interpolate(..., antialias=False)`` inside
+the graph aside, SK-RD4AD's ``torchvision.transforms.v2.Resize(antialias=True)``) resize
+with a low-pass filter applied before subsampling. Inspection-camera images are typically
+much larger than the model's 256x256 input, so a naive ``cv2.resize`` with the default
+``INTER_LINEAR`` interpolation aliases high-frequency, periodic content (e.g. woven fabric)
+into a moire pattern the model never saw in training - it then reports the whole aliased
+region as anomalous instead of the real defect. ``INTER_AREA`` (OpenCV's recommended mode
+for shrinking) area-averages pixels before subsampling, which closely approximates an
+anti-aliased resize and removes this artifact; ``INTER_LINEAR`` stays correct for the (rare)
+upscaling case, where there is no aliasing to guard against.
 """
 
 import numpy as np
@@ -55,6 +68,15 @@ class Preprocessor:
             return "uint8_hwc_ingraph"
         return "float32_chw_imagenet"
 
+    @staticmethod
+    def _resize(img: np.ndarray, w: int, h: int) -> np.ndarray:
+        """Resize to (w, h), using an area-averaging filter when shrinking to avoid
+        aliasing on high-frequency/periodic content (see module docstring)."""
+        src_h, src_w = img.shape[:2]
+        shrinking = w < src_w or h < src_h
+        interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
+        return cv2.resize(img, (w, h), interpolation=interpolation)
+
     def __call__(self, image_path: str) -> np.ndarray:
         """Load and preprocess a single image, returning a batched (1, ...) array."""
         img_bgr = cv2.imread(str(image_path))
@@ -63,7 +85,7 @@ class Preprocessor:
 
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         h, w = self.image_size
-        img_resized = cv2.resize(img_rgb, (w, h))
+        img_resized = self._resize(img_rgb, w, h)
 
         if self.mode == "uint8_hwc_ingraph":
             tensor = img_resized.astype(np.uint8)
@@ -78,4 +100,4 @@ class Preprocessor:
         """Load the original image (BGR, resized to the model's input size) for visualization."""
         img_bgr = cv2.imread(str(image_path))
         h, w = self.image_size
-        return cv2.resize(img_bgr, (w, h))
+        return self._resize(img_bgr, w, h)

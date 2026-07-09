@@ -37,19 +37,24 @@ def parse_args() -> argparse.Namespace:
                               "NON-calibrated fallback (midpoint of the folder's raw score range) "
                               "is used and a warning is logged — verdicts are then unreliable.")
 
-    parser.add_argument("--blur_kernel_size", type=int, default=25,
+    parser.add_argument("--blur_kernel_size", type=int, default=None,
                          help="Gaussian blur kernel size applied to the raw anomaly map before "
-                              "display/scoring. SuperSimpleNet: 25 (sigma=4). SK-RD4AD: pass "
-                              "--blur_kernel_size 15 --blur_sigma 0 to match eval.py's "
-                              "cv2.GaussianBlur((15,15), 0). The ONNX graph itself has no blur.")
-    parser.add_argument("--blur_sigma", type=float, default=4.0,
-                         help="Gaussian blur sigma. Pass 0 to let OpenCV derive sigma from the "
-                              "kernel size (SK-RD4AD eval convention).")
-    parser.add_argument("--score_from_map", action="store_true",
-                         help="Derive the image score from the (blurred) anomaly-map max instead "
-                              "of the graph's anomaly_score output. Required for SK-RD4AD to match "
-                              "eval.py, whose threshold is calibrated on max(blur(map)). Leave OFF "
-                              "for SuperSimpleNet, whose score is a separate classification head.")
+                              "display/scoring. Default: auto-detected from the ONNX model's "
+                              "embedded metadata (see src/model_config.py). Pass explicitly only "
+                              "to override the model's own declared value.")
+    parser.add_argument("--blur_sigma", type=float, default=None,
+                         help="Gaussian blur sigma. Default: auto-detected from the ONNX model's "
+                              "metadata. 0 lets OpenCV derive sigma from the kernel size.")
+    parser.add_argument("--score_source", type=str, default="auto",
+                         choices=["auto", "graph", "map_max_blurred"],
+                         help="Where the image-level anomaly score comes from. 'auto' (default) "
+                              "reads it from the ONNX model's embedded metadata. 'graph' uses the "
+                              "graph's anomaly_score output directly (SuperSimpleNet: a dedicated "
+                              "classification head). 'map_max_blurred' derives it from the max of "
+                              "the blurred anomaly map (SK-RD4AD: eval.py calibrates its threshold "
+                              "this way, NOT on the graph's raw anomaly_score output). Getting this "
+                              "wrong silently produces a real but uncalibrated number - it will not "
+                              "crash, so 'auto' should be preferred unless you have a specific reason.")
     parser.add_argument("--no_blur", action="store_true",
                          help="Disable the post-processing Gaussian blur (use if your ONNX export "
                               "already includes it inside the graph).")

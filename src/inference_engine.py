@@ -20,6 +20,10 @@ class AnomalyInferenceEngine:
         active_providers = self.session.get_providers()
         log(f"Model loaded successfully. Active execution providers: {active_providers}")
 
+        # Architecture-specific config (score source, blur) embedded by the export
+        # script; see src/model_config.py for why this matters.
+        self.metadata = dict(self.session.get_modelmeta().custom_metadata_map)
+
         self.preprocessor = Preprocessor(self.session)
         self.input_name = self.preprocessor.input_name
 

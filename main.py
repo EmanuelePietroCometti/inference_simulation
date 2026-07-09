@@ -28,11 +28,12 @@ from src.postprocessing import (
     build_heatmap_overlay,
     annotate_result,
 )
+from src.model_config import resolve_runtime_config
 from src.batch_benchmark import run_batch_comparison
 from src.results_writer import write_benchmark_results
 
 
-def collect_raw_outputs(engine, image_paths, cache_dir, args):
+def collect_raw_outputs(engine, image_paths, cache_dir, args, runtime_config):
     """
     Pass 1/2: run inference once per image, apply the training Gaussian blur,
     cache raw outputs to disk, and track folder-wide min/max for both the
@@ -51,13 +52,14 @@ def collect_raw_outputs(engine, image_paths, cache_dir, args):
 
         anomaly_map = anomaly_maps[0, 0]
         if not args.no_blur:
-            anomaly_map = apply_training_blur(anomaly_map, args.blur_kernel_size, args.blur_sigma)
+            anomaly_map = apply_training_blur(
+                anomaly_map, runtime_config.blur_kernel_size, runtime_config.blur_sigma
+            )
 
-        # Image score. For SK-RD4AD the eval threshold is calibrated on the max of
-        # the *blurred* map, so --score_from_map reproduces that exactly. For
-        # SuperSimpleNet the score is a dedicated classification head, so we use
-        # the graph's anomaly_score output as-is.
-        if args.score_from_map:
+        # Image score: which output to threshold on is architecture-specific (see
+        # src/model_config.py) - e.g. SK-RD4AD's eval threshold is calibrated on
+        # the max of the *blurred* map, NOT the graph's raw anomaly_score output.
+        if runtime_config.score_source == "map_max_blurred":
             anomaly_score = float(anomaly_map.max())
         else:
             anomaly_score = float(anomaly_scores[0])
@@ -133,10 +135,12 @@ def main() -> None:
     engine = AnomalyInferenceEngine(args.model, providers)
     image_paths = list_images(args.input_dir, args.extension)
 
+    runtime_config = resolve_runtime_config(engine.metadata, args)
+
     heatmap_dir = ensure_dir(f"{args.output_dir}/heatmaps")
     cache_dir = ensure_dir(f"{args.output_dir}/.raw_cache")
 
-    stats = collect_raw_outputs(engine, image_paths, cache_dir, args)
+    stats = collect_raw_outputs(engine, image_paths, cache_dir, args, runtime_config)
     log(f"Folder-wide anomaly map range: [{stats['map_min']:.4f}, {stats['map_max']:.4f}]")
     log(f"Folder-wide anomaly score range: [{stats['score_min']:.4f}, {stats['score_max']:.4f}]")
     log(f"Heatmap display normalization: {args.normalize}")
@@ -176,6 +180,10 @@ def main() -> None:
         "device": args.device,
         "precision": args.precision,
         "active_providers": engine.session.get_providers(),
+        "architecture": runtime_config.architecture,
+        "score_source": runtime_config.score_source,
+        "blur": [runtime_config.blur_kernel_size, runtime_config.blur_sigma] if not args.no_blur else None,
+        "architecture_config_verified": runtime_config.verified,
         "num_images": num_images,
         "num_anomalous": num_anomalous,
         "num_normal": num_images - num_anomalous,
