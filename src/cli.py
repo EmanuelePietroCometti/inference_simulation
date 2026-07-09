@@ -30,12 +30,11 @@ def parse_args() -> argparse.Namespace:
                          help="Directory where TensorRT engines are cached between runs.")
 
     parser.add_argument("--threshold", type=float, default=None,
-                         help="ABSOLUTE anomaly-score threshold in the model's RAW score units "
-                              "(the pure ONNX graph outputs raw scores: no sigmoid / no min-max). "
-                              "Use the value your model's eval prints, e.g. SK-RD4AD eval.py's "
-                              "'best_threshold_raw' (F1-optimal on raw scores). If omitted, a "
-                              "NON-calibrated fallback (midpoint of the folder's raw score range) "
-                              "is used and a warning is logged — verdicts are then unreliable.")
+                         help="ABSOLUTE anomaly-score threshold in the model's RAW score units. "
+                              "If omitted, the runtime uses the 'calibrated_threshold' embedded "
+                              "in the model by calibrate_threshold.py --embed; if the model has "
+                              "none, it falls back to the folder raw-score midpoint (unreliable, "
+                              "logged with a warning).")
 
     parser.add_argument("--blur_kernel_size", type=int, default=None,
                          help="Gaussian blur kernel size applied to the raw anomaly map before "
@@ -59,16 +58,16 @@ def parse_args() -> argparse.Namespace:
                          help="Disable the post-processing Gaussian blur (use if your ONNX export "
                               "already includes it inside the graph).")
 
-    parser.add_argument("--normalize", type=str, default="per_image", choices=["per_image", "folder"],
-                         help="How to min-max normalize the anomaly map for heatmap DISPLAY only "
-                              "(never affects the OK/ANOMALY verdict, which always uses the absolute "
-                              "raw --threshold). 'per_image' (default) stretches each image's own "
-                              "map to [0,1], so the local defect region stands out regardless of "
-                              "baseline differences between images (texture/lighting) that otherwise "
-                              "compress everything into one end of a narrow folder-wide range, making "
-                              "every heatmap look uniformly red. 'folder' uses the folder-wide min/max "
-                              "(comparable brightness across images, but can wash out low-contrast "
-                              "raw signals like SK-RD4AD's narrow cosine-distance range).")
+    parser.add_argument("--normalize", type=str, default="auto",
+                         choices=["auto", "threshold", "per_image", "folder"],
+                         help="Heatmap DISPLAY normalization (never affects the OK/ANOMALY verdict). "
+                              "'auto' (default): 'threshold' when a calibrated/user threshold exists, "
+                              "else 'per_image'. 'threshold': eval.py-style threshold-centric coloring "
+                              "- below-threshold pixels stay cold, above-threshold render warm; the "
+                              "cleanest view, background noise stays blue. 'per_image': each image's "
+                              "own min-max (defect stands out, but the noise floor gets stretched -> "
+                              "speckled background). 'folder': folder-wide min/max (cross-image "
+                              "comparable brightness, can wash out narrow raw ranges).")
     parser.add_argument("--colormap", type=str, default="JET",
                          choices=["JET", "TURBO", "INFERNO", "HOT"],
                          help="OpenCV colormap used to render the anomaly heatmap.")

@@ -25,6 +25,7 @@ from src.raw_cache import save_raw, load_raw, cleanup as cleanup_cache
 from src.postprocessing import (
     apply_training_blur,
     normalize_global,
+    normalize_threshold_centric,
     build_heatmap_overlay,
     annotate_result,
 )
@@ -80,25 +81,26 @@ def collect_raw_outputs(engine, image_paths, cache_dir, args, runtime_config):
     }
 
 
-def render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshold, args):
+def render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshold, args,
+                    display_mode):
     """Pass 2/2: reload cached raw outputs, normalize for display, render and save."""
-    log("Rendering heatmaps (pass 2/2: folder-wide normalization)...")
+    log(f"Rendering heatmaps (pass 2/2, display normalization: {display_mode})...")
     per_image_records = []
 
     for image_path in image_paths:
         anomaly_map, anomaly_score = load_raw(cache_dir, image_path)
 
-        # The map is min-max normalized for DISPLAY only; the verdict does NOT use
-        # any normalization, it compares the RAW score against the absolute
-        # threshold, exactly like the model's eval.py (raw_score >= best_threshold_raw).
-        # Default is per-image min/max: raw anomaly maps (e.g. SK-RD4AD's cosine
-        # distance) can have a folder-wide range so narrow that inter-image
-        # baseline differences (lighting/texture) dominate it, compressing every
-        # image toward one end and making every heatmap look uniformly red under
-        # folder-wide normalization even though each image's own local contrast
-        # (background vs defect) is meaningful. --normalize folder restores the
-        # old cross-image-comparable behavior when that's what's needed instead.
-        if args.normalize == "folder":
+        # Normalization here is for DISPLAY only; the verdict always compares the
+        # RAW score against the absolute threshold.
+        #   threshold : eval.py-style threshold-centric coloring (below-threshold
+        #               pixels stay cold, above-threshold render warm) - the
+        #               cleanest view, but needs a calibrated threshold.
+        #   per_image : each image's own min-max (good without a threshold, but
+        #               stretches the noise floor -> speckled background).
+        #   folder    : folder-wide min-max (cross-image comparable brightness).
+        if display_mode == "threshold":
+            normalized_map = normalize_threshold_centric(anomaly_map, threshold)
+        elif display_mode == "folder":
             normalized_map = normalize_global(anomaly_map, stats["map_min"], stats["map_max"])
         else:
             normalized_map = normalize_global(anomaly_map, float(anomaly_map.min()), float(anomaly_map.max()))
@@ -143,25 +145,41 @@ def main() -> None:
     stats = collect_raw_outputs(engine, image_paths, cache_dir, args, runtime_config)
     log(f"Folder-wide anomaly map range: [{stats['map_min']:.4f}, {stats['map_max']:.4f}]")
     log(f"Folder-wide anomaly score range: [{stats['score_min']:.4f}, {stats['score_max']:.4f}]")
-    log(f"Heatmap display normalization: {args.normalize}")
 
+    # Threshold resolution order: explicit flag > calibration embedded in the
+    # model (written by calibrate_threshold.py --embed) > uncalibrated fallback.
+    threshold_calibrated = True
     if args.threshold is not None:
         threshold = args.threshold
         threshold_source = "user-provided ABSOLUTE raw-score threshold"
+    elif "calibrated_threshold" in engine.metadata:
+        threshold = float(engine.metadata["calibrated_threshold"])
+        threshold_source = (f"embedded calibration "
+                            f"({engine.metadata.get('calibration_info', 'no info')})")
     else:
         # No sensible fixed default exists in raw-score units (they are unbounded
         # and model-specific), so fall back to the midpoint of the folder's raw
         # score range purely so the run produces *something* — and warn loudly
         # that verdicts are not trustworthy without a calibrated threshold.
         threshold = 0.5 * (stats["score_min"] + stats["score_max"])
+        threshold_calibrated = False
         threshold_source = "NON-calibrated fallback (folder raw-score midpoint)"
-        log("WARNING: no --threshold given. Raw scores have no fixed 0.5 boundary; "
-            "using the folder raw-score midpoint as a rough fallback. Pass the "
-            "absolute threshold from your model's eval (e.g. SK-RD4AD "
-            "'best_threshold_raw') for reliable OK/ANOMALY verdicts.")
+        log("WARNING: no --threshold given and no calibration embedded in the model. "
+            "Using the folder raw-score midpoint as a rough fallback - verdicts are "
+            "NOT reliable. Calibrate once with:  python calibrate_threshold.py "
+            "--model <model.onnx> --good_dir <good images> --embed")
     log(f"Using threshold: {threshold:.6f} ({threshold_source})")
 
-    per_image_records = render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshold, args)
+    # Display mode: 'auto' picks the clean eval.py-style threshold-centric view
+    # when a real (calibrated/user) threshold exists, per-image min-max otherwise
+    # (threshold-centric coloring around an arbitrary fallback would be misleading).
+    if args.normalize == "auto":
+        display_mode = "threshold" if threshold_calibrated else "per_image"
+    else:
+        display_mode = args.normalize
+
+    per_image_records = render_heatmaps(engine, image_paths, cache_dir, heatmap_dir,
+                                        stats, threshold, args, display_mode)
     cleanup_cache(cache_dir)
     log(f"Heatmaps saved to: {heatmap_dir}")
 
@@ -187,7 +205,7 @@ def main() -> None:
         "num_images": num_images,
         "num_anomalous": num_anomalous,
         "num_normal": num_images - num_anomalous,
-        "heatmap_display_normalization": args.normalize,
+        "heatmap_display_normalization": display_mode,
         "map_normalization_range": [round(stats["map_min"], 6), round(stats["map_max"], 6)],
         "score_normalization_range": [round(stats["score_min"], 6), round(stats["score_max"], 6)],
         "threshold": round(threshold, 6),

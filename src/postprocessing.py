@@ -66,6 +66,38 @@ def normalize_global(value, global_min: float, global_max: float) -> np.ndarray:
     return (np.asarray(value, dtype=np.float32) - global_min) / denom
 
 
+def normalize_threshold_centric(anomaly_map: np.ndarray, threshold: float) -> np.ndarray:
+    """
+    Threshold-centric display normalization, replicating SK-RD4AD eval.py's
+    save_confusion_map: values below the decision threshold map to [0, 0.5]
+    (cold colors), values above map to [0.5, 1.0] (warm colors), and the
+    image's own max is forced to 1.0 (deep red).
+
+    Compared to plain per-image min-max — which stretches the background noise
+    floor across the whole colormap, producing speckly blue/yellow texture
+    everywhere — this pins the decision boundary at the colormap midpoint, so
+    background stays uniformly cold and only truly above-threshold regions
+    render warm. This is what makes the training-repo visualizations look
+    "clean". Requires a calibrated absolute threshold (score and map share the
+    same units: the score IS the max of this map for SK-RD4AD).
+    """
+    amap = np.asarray(anomaly_map, dtype=np.float32)
+    lo, hi = float(amap.min()), float(amap.max())
+    out = np.zeros_like(amap)
+
+    below = amap < threshold
+    if threshold > lo:
+        out[below] = 0.5 * (amap[below] - lo) / (threshold - lo)
+
+    above = ~below
+    if hi > threshold:
+        out[above] = 0.5 + 0.5 * (amap[above] - threshold) / (hi - threshold)
+    else:
+        out[above] = 0.5  # pixel exactly at threshold and also the image max
+
+    return np.clip(out, 0.0, 1.0)
+
+
 def map_to_uint8(normalized_map: np.ndarray) -> np.ndarray:
     """Convert an already [0, 1]-normalized map to a uint8 image for colormap rendering."""
     clipped = np.clip(normalized_map, 0.0, 1.0)
