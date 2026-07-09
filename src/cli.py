@@ -30,17 +30,26 @@ def parse_args() -> argparse.Namespace:
                          help="Directory where TensorRT engines are cached between runs.")
 
     parser.add_argument("--threshold", type=float, default=None,
-                         help="Anomaly score threshold, expressed in the folder-normalized [0, 1] "
-                              "space (same convention as eval.py). If omitted, defaults to 0.5, "
-                              "matching the fixed cutoff used by the training visualizer. "
-                              "Prefer a threshold derived from a labeled validation set when available.")
+                         help="ABSOLUTE anomaly-score threshold in the model's RAW score units "
+                              "(the pure ONNX graph outputs raw scores: no sigmoid / no min-max). "
+                              "Use the value your model's eval prints, e.g. SK-RD4AD eval.py's "
+                              "'best_threshold_raw' (F1-optimal on raw scores). If omitted, a "
+                              "NON-calibrated fallback (midpoint of the folder's raw score range) "
+                              "is used and a warning is logged — verdicts are then unreliable.")
 
     parser.add_argument("--blur_kernel_size", type=int, default=25,
-                         help="Gaussian blur kernel size applied to the raw anomaly map, matching "
-                              "model/supersimplenet.py's AnomalyMapGenerator (sigma=4 -> kernel=25). "
-                              "The ONNX export disables this blur inside the graph.")
+                         help="Gaussian blur kernel size applied to the raw anomaly map before "
+                              "display/scoring. SuperSimpleNet: 25 (sigma=4). SK-RD4AD: pass "
+                              "--blur_kernel_size 15 --blur_sigma 0 to match eval.py's "
+                              "cv2.GaussianBlur((15,15), 0). The ONNX graph itself has no blur.")
     parser.add_argument("--blur_sigma", type=float, default=4.0,
-                         help="Gaussian blur sigma, matching AnomalyMapGenerator(sigma=4).")
+                         help="Gaussian blur sigma. Pass 0 to let OpenCV derive sigma from the "
+                              "kernel size (SK-RD4AD eval convention).")
+    parser.add_argument("--score_from_map", action="store_true",
+                         help="Derive the image score from the (blurred) anomaly-map max instead "
+                              "of the graph's anomaly_score output. Required for SK-RD4AD to match "
+                              "eval.py, whose threshold is calibrated on max(blur(map)). Leave OFF "
+                              "for SuperSimpleNet, whose score is a separate classification head.")
     parser.add_argument("--no_blur", action="store_true",
                          help="Disable the post-processing Gaussian blur (use if your ONNX export "
                               "already includes it inside the graph).")

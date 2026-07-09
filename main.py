@@ -25,7 +25,6 @@ from src.postprocessing import (
     normalize_global,
     build_heatmap_overlay,
     annotate_result,
-    DEFAULT_THRESHOLD,
 )
 from src.batch_benchmark import run_batch_comparison
 from src.results_writer import write_benchmark_results
@@ -51,7 +50,15 @@ def collect_raw_outputs(engine, image_paths, cache_dir, args):
         anomaly_map = anomaly_maps[0, 0]
         if not args.no_blur:
             anomaly_map = apply_training_blur(anomaly_map, args.blur_kernel_size, args.blur_sigma)
-        anomaly_score = float(anomaly_scores[0])
+
+        # Image score. For SK-RD4AD the eval threshold is calibrated on the max of
+        # the *blurred* map, so --score_from_map reproduces that exactly. For
+        # SuperSimpleNet the score is a dedicated classification head, so we use
+        # the graph's anomaly_score output as-is.
+        if args.score_from_map:
+            anomaly_score = float(anomaly_map.max())
+        else:
+            anomaly_score = float(anomaly_scores[0])
 
         save_raw(cache_dir, image_path, anomaly_map, anomaly_score)
 
@@ -77,14 +84,16 @@ def render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshol
     for image_path in image_paths:
         anomaly_map, anomaly_score = load_raw(cache_dir, image_path)
 
+        # The map is min-max normalized folder-wide for DISPLAY only (comparable
+        # heatmaps across images). The verdict does NOT use any normalization: it
+        # compares the RAW score against the absolute threshold, exactly like the
+        # model's eval.py (raw_score >= best_threshold_raw).
         normalized_map = normalize_global(anomaly_map, stats["map_min"], stats["map_max"])
-        score_denom = max(stats["score_max"] - stats["score_min"], 1e-8)
-        normalized_score = (anomaly_score - stats["score_min"]) / score_denom
-        is_anomalous = bool(normalized_score >= threshold)
+        is_anomalous = bool(anomaly_score >= threshold)
 
         original_bgr = engine.preprocessor.load_original_bgr(str(image_path))
         overlay = build_heatmap_overlay(original_bgr, normalized_map, args.colormap, args.overlay_alpha)
-        annotated = annotate_result(overlay, normalized_score, threshold, is_anomalous)
+        annotated = annotate_result(overlay, anomaly_score, threshold, is_anomalous)
 
         out_path = heatmap_dir / f"{image_path.stem}_heatmap.png"
         cv2.imwrite(str(out_path), annotated)
@@ -92,7 +101,6 @@ def render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshol
         per_image_records.append({
             "filename": image_path.name,
             "raw_anomaly_score": round(anomaly_score, 6),
-            "normalized_anomaly_score": round(normalized_score, 6),
             "is_anomalous": is_anomalous,
         })
 
@@ -121,11 +129,19 @@ def main() -> None:
 
     if args.threshold is not None:
         threshold = args.threshold
-        threshold_source = "user-provided (folder-normalized [0, 1] space)"
+        threshold_source = "user-provided ABSOLUTE raw-score threshold"
     else:
-        threshold = DEFAULT_THRESHOLD
-        threshold_source = "default 0.5 on folder-normalized score (matches training's fixed decision boundary)"
-    log(f"Using threshold: {threshold:.4f} ({threshold_source})")
+        # No sensible fixed default exists in raw-score units (they are unbounded
+        # and model-specific), so fall back to the midpoint of the folder's raw
+        # score range purely so the run produces *something* — and warn loudly
+        # that verdicts are not trustworthy without a calibrated threshold.
+        threshold = 0.5 * (stats["score_min"] + stats["score_max"])
+        threshold_source = "NON-calibrated fallback (folder raw-score midpoint)"
+        log("WARNING: no --threshold given. Raw scores have no fixed 0.5 boundary; "
+            "using the folder raw-score midpoint as a rough fallback. Pass the "
+            "absolute threshold from your model's eval (e.g. SK-RD4AD "
+            "'best_threshold_raw') for reliable OK/ANOMALY verdicts.")
+    log(f"Using threshold: {threshold:.6f} ({threshold_source})")
 
     per_image_records = render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshold, args)
     cleanup_cache(cache_dir)
