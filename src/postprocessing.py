@@ -4,15 +4,21 @@ visualization pipeline (eval.py + common/visualizer.py from the training repo).
 
 Two key differences from a naive per-image implementation:
 
-1. Normalization is computed GLOBALLY across the whole processed folder, exactly
-   like eval.py does across the whole test set:
+1. Normalization for heatmap DISPLAY is min-max, either PER-IMAGE (default) or
+   folder-wide (opt-in via ``--normalize folder``), never affecting the verdict:
 
-       anomaly_map = (anomaly_map - global_min) / (global_max - global_min)
+       anomaly_map = (anomaly_map - map_min) / (map_max - map_min)
 
-   Per-image min-max normalization (stretching each image independently) produces
-   misleading heatmaps: a perfectly normal image would always show a "hot" region
-   simply because some pixel has to be the local maximum. Folder-wide statistics
-   keep images comparable to each other, exactly like training.
+   Folder-wide statistics (like eval.py computes across the whole test set) keep
+   images comparable to each other, but some raw maps (e.g. SK-RD4AD's summed
+   cosine-distance) have a folder-wide range so narrow that baseline differences
+   between images (lighting/texture) dominate it: every image gets pushed toward
+   one end of that narrow range and every heatmap looks uniformly red/blue, even
+   though each image's own local contrast (background vs defect) is meaningful.
+   Per-image normalization restores that local contrast; its one downside (a
+   perfectly normal, low-contrast image will still show a "hot" local maximum,
+   since some pixel always has to be the max) is a display-only quirk that never
+   affects classification, which uses the separate absolute raw-score threshold.
 
 2. A Gaussian blur (kernel_size=25, sigma=4) is re-applied to the raw anomaly map.
    The ONNX export disables this blur inside the graph (see export_onnx.py,

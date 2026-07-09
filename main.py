@@ -3,10 +3,12 @@ SuperSimpleNet ONNX inference over a folder of images.
 
 Runs the exported ONNX model (FP32 / FP16 / INT8 via TensorRT, CUDA, or CPU) on
 every image in a folder and:
-  - saves an anomaly heatmap overlay per image, normalized using folder-wide
-    statistics and re-blurred to match the training evaluation pipeline
-    (eval.py + model/supersimplenet.py's AnomalyMapGenerator)
-  - classifies each image using a threshold in that same normalized [0, 1] space
+  - saves an anomaly heatmap overlay per image, normalized for display (per-image
+    by default, or folder-wide via --normalize folder) and re-blurred to match
+    the training evaluation pipeline (eval.py + model/supersimplenet.py's
+    AnomalyMapGenerator)
+  - classifies each image using the absolute RAW-score --threshold (unrelated to
+    the display normalization)
   - benchmarks inference throughput at batch size 1 and batch size 17 (or any
     sizes passed via --batch_sizes)
 
@@ -77,18 +79,27 @@ def collect_raw_outputs(engine, image_paths, cache_dir, args):
 
 
 def render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshold, args):
-    """Pass 2/2: reload cached raw outputs, normalize with folder-wide stats, render and save."""
+    """Pass 2/2: reload cached raw outputs, normalize for display, render and save."""
     log("Rendering heatmaps (pass 2/2: folder-wide normalization)...")
     per_image_records = []
 
     for image_path in image_paths:
         anomaly_map, anomaly_score = load_raw(cache_dir, image_path)
 
-        # The map is min-max normalized folder-wide for DISPLAY only (comparable
-        # heatmaps across images). The verdict does NOT use any normalization: it
-        # compares the RAW score against the absolute threshold, exactly like the
-        # model's eval.py (raw_score >= best_threshold_raw).
-        normalized_map = normalize_global(anomaly_map, stats["map_min"], stats["map_max"])
+        # The map is min-max normalized for DISPLAY only; the verdict does NOT use
+        # any normalization, it compares the RAW score against the absolute
+        # threshold, exactly like the model's eval.py (raw_score >= best_threshold_raw).
+        # Default is per-image min/max: raw anomaly maps (e.g. SK-RD4AD's cosine
+        # distance) can have a folder-wide range so narrow that inter-image
+        # baseline differences (lighting/texture) dominate it, compressing every
+        # image toward one end and making every heatmap look uniformly red under
+        # folder-wide normalization even though each image's own local contrast
+        # (background vs defect) is meaningful. --normalize folder restores the
+        # old cross-image-comparable behavior when that's what's needed instead.
+        if args.normalize == "folder":
+            normalized_map = normalize_global(anomaly_map, stats["map_min"], stats["map_max"])
+        else:
+            normalized_map = normalize_global(anomaly_map, float(anomaly_map.min()), float(anomaly_map.max()))
         is_anomalous = bool(anomaly_score >= threshold)
 
         original_bgr = engine.preprocessor.load_original_bgr(str(image_path))
@@ -98,9 +109,11 @@ def render_heatmaps(engine, image_paths, cache_dir, heatmap_dir, stats, threshol
         out_path = heatmap_dir / f"{image_path.stem}_heatmap.png"
         cv2.imwrite(str(out_path), annotated)
 
+        normalized_score = normalize_global(anomaly_score, stats["score_min"], stats["score_max"])
         per_image_records.append({
             "filename": image_path.name,
             "raw_anomaly_score": round(anomaly_score, 6),
+            "normalized_anomaly_score": round(float(normalized_score), 6),
             "is_anomalous": is_anomalous,
         })
 
@@ -126,6 +139,7 @@ def main() -> None:
     stats = collect_raw_outputs(engine, image_paths, cache_dir, args)
     log(f"Folder-wide anomaly map range: [{stats['map_min']:.4f}, {stats['map_max']:.4f}]")
     log(f"Folder-wide anomaly score range: [{stats['score_min']:.4f}, {stats['score_max']:.4f}]")
+    log(f"Heatmap display normalization: {args.normalize}")
 
     if args.threshold is not None:
         threshold = args.threshold
@@ -165,6 +179,7 @@ def main() -> None:
         "num_images": num_images,
         "num_anomalous": num_anomalous,
         "num_normal": num_images - num_anomalous,
+        "heatmap_display_normalization": args.normalize,
         "map_normalization_range": [round(stats["map_min"], 6), round(stats["map_max"], 6)],
         "score_normalization_range": [round(stats["score_min"], 6), round(stats["score_max"], 6)],
         "threshold": round(threshold, 6),

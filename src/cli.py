@@ -54,6 +54,16 @@ def parse_args() -> argparse.Namespace:
                          help="Disable the post-processing Gaussian blur (use if your ONNX export "
                               "already includes it inside the graph).")
 
+    parser.add_argument("--normalize", type=str, default="per_image", choices=["per_image", "folder"],
+                         help="How to min-max normalize the anomaly map for heatmap DISPLAY only "
+                              "(never affects the OK/ANOMALY verdict, which always uses the absolute "
+                              "raw --threshold). 'per_image' (default) stretches each image's own "
+                              "map to [0,1], so the local defect region stands out regardless of "
+                              "baseline differences between images (texture/lighting) that otherwise "
+                              "compress everything into one end of a narrow folder-wide range, making "
+                              "every heatmap look uniformly red. 'folder' uses the folder-wide min/max "
+                              "(comparable brightness across images, but can wash out low-contrast "
+                              "raw signals like SK-RD4AD's narrow cosine-distance range).")
     parser.add_argument("--colormap", type=str, default="JET",
                          choices=["JET", "TURBO", "INFERNO", "HOT"],
                          help="OpenCV colormap used to render the anomaly heatmap.")
