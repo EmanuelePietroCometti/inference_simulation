@@ -52,14 +52,18 @@ def collect_raw_outputs(engine, image_paths, cache_dir, args, runtime_config):
         total_time += elapsed
 
         anomaly_map = anomaly_maps[0, 0]
-        if not args.no_blur:
+        # Host-side blur only when the graph does NOT already include it
+        # (contract 2.0 bakes the canonical blur into the graph; blurring again
+        # would invalidate the calibrated threshold - see src/model_config.py).
+        if not args.no_blur and not runtime_config.blur_in_graph:
             anomaly_map = apply_training_blur(
                 anomaly_map, runtime_config.blur_kernel_size, runtime_config.blur_sigma
             )
 
         # Image score: which output to threshold on is architecture-specific (see
-        # src/model_config.py) - e.g. SK-RD4AD's eval threshold is calibrated on
-        # the max of the *blurred* map, NOT the graph's raw anomaly_score output.
+        # src/model_config.py). Contract 2.0 models emit a directly-thresholdable
+        # anomaly_score (max of the in-graph blurred map); contract 1.0 SK-RD4AD
+        # models need it derived host-side from the max of the blurred map.
         if runtime_config.score_source == "map_max_blurred":
             anomaly_score = float(anomaly_map.max())
         else:
@@ -200,7 +204,9 @@ def main() -> None:
         "active_providers": engine.session.get_providers(),
         "architecture": runtime_config.architecture,
         "score_source": runtime_config.score_source,
-        "blur": [runtime_config.blur_kernel_size, runtime_config.blur_sigma] if not args.no_blur else None,
+        "blur": ("baked_in_graph" if runtime_config.blur_in_graph
+                 else [runtime_config.blur_kernel_size, runtime_config.blur_sigma] if not args.no_blur
+                 else None),
         "architecture_config_verified": runtime_config.verified,
         "num_images": num_images,
         "num_anomalous": num_anomalous,

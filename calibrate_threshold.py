@@ -6,13 +6,23 @@ model's embedded metadata), and optionally embed it into the .onnx file.
 
 Why this exists
 ----------------
-SK-RD4AD's training saves only weights (no threshold), and its eval.py computes
-'best_threshold_raw' WITHOUT the dynamic object crop that training and this
-runtime apply — so that value lives in a different score distribution and does
-not transfer. The only threshold that is valid for production is one computed
-through the identical inference pipeline. This script does that, and with
---embed writes it into the model's metadata as 'calibrated_threshold', which
-main.py then picks up automatically (no --threshold flag needed at inference).
+A threshold is only valid for the pipeline that produced the scores it was
+computed on. This script scores images through the identical inference
+pipeline main.py uses (dynamic crop, resize, blur/score convention — all
+auto-configured from the model's embedded metadata, contract 1.0 and 2.0 both
+supported) and, with --embed, writes the result into the model's metadata as
+'calibrated_threshold', which main.py picks up automatically.
+
+Two calibrators exist on purpose:
+  - this one: UNLABELED good-only calibration (percentile of good scores,
+    optionally refined with a defect folder) — for production images where no
+    ground truth exists;
+  - the training repo's calibrate_threshold.py: F1-optimal threshold on a
+    LABELED MVTec-style test set, also through the ONNX pipeline.
+With a contract-2.0 model (canonical pipeline, in-graph blur) the two produce
+thresholds in the SAME units, and eval.py's calibration_pytorch.json should
+agree as well — modulo the different threshold criterion and the cv2-vs-
+torchvision resize filter difference on the initial downscale.
 
 Usage
 -----
@@ -40,10 +50,13 @@ def compute_scores(engine, cfg, paths) -> np.ndarray:
     scores = []
     for p in paths:
         maps, raw_scores, _ = engine.run_batch(engine.preprocess(str(p)))
-        amap = apply_training_blur(maps[0, 0], cfg.blur_kernel_size, cfg.blur_sigma)
         if cfg.score_source == "map_max_blurred":
+            # Contract 1.0: the graph map is raw; blur host-side before scoring.
+            amap = apply_training_blur(maps[0, 0], cfg.blur_kernel_size, cfg.blur_sigma)
             scores.append(float(amap.max()))
         else:
+            # "graph" (SuperSimpleNet head, or contract 2.0 with in-graph blur):
+            # the graph's anomaly_score is already the number to threshold on.
             scores.append(float(raw_scores[0]))
     return np.array(scores, dtype=np.float64)
 

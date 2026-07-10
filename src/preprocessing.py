@@ -12,16 +12,23 @@ mode, logging the decision so it is always visible which one was used for a give
 
 Resize / anti-aliasing
 -----------------------
-All training pipelines (SuperSimpleNet's ``F.interpolate(..., antialias=False)`` inside
-the graph aside, SK-RD4AD's ``torchvision.transforms.v2.Resize(antialias=True)``) resize
-with a low-pass filter applied before subsampling. Inspection-camera images are typically
-much larger than the model's 256x256 input, so a naive ``cv2.resize`` with the default
-``INTER_LINEAR`` interpolation aliases high-frequency, periodic content (e.g. woven fabric)
-into a moire pattern the model never saw in training - it then reports the whole aliased
-region as anomalous instead of the real defect. ``INTER_AREA`` (OpenCV's recommended mode
-for shrinking) area-averages pixels before subsampling, which closely approximates an
-anti-aliased resize and removes this artifact; ``INTER_LINEAR`` stays correct for the (rare)
-upscaling case, where there is no aliasing to guard against.
+All training pipelines resize with ``torchvision.transforms.v2.Resize(antialias=True)``,
+i.e. an antialiased BILINEAR filter designed to match PIL's convolution-based
+resampling. This runtime therefore resizes with PIL's ``Image.resize(BILINEAR)``:
+it is the closest available match to what the encoder saw in training, which is
+what keeps inference scores in the same units as the calibrated threshold.
+
+Two properties matter:
+  1. It is a proper low-pass filter when shrinking. Inspection-camera images are
+     much larger than the model's 256x256 input, and a naive ``cv2.resize`` with
+     ``INTER_LINEAR`` aliases high-frequency periodic content (e.g. woven fabric)
+     into a moire pattern the model never saw - it then flags the whole aliased
+     region as anomalous. (An earlier revision used ``cv2.INTER_AREA`` for this;
+     PIL's antialiased bilinear both fixes the moire AND matches training, so it
+     replaced INTER_AREA when the pipelines were unified on the canonical
+     contract-2.0 definition.)
+  2. On upscaling (the dynamic-crop re-expansion) it degrades to plain bilinear,
+     exactly like torchvision's antialias=True does.
 
 Dynamic object crop (SK-RD4AD only)
 -------------------------------------
@@ -46,6 +53,7 @@ architectures that don't declare it (e.g. SuperSimpleNet never crops).
 import numpy as np
 import cv2
 import onnxruntime as ort
+from PIL import Image
 
 from src.utils import log
 
@@ -98,12 +106,10 @@ class Preprocessor:
 
     @staticmethod
     def _resize(img: np.ndarray, w: int, h: int) -> np.ndarray:
-        """Resize to (w, h), using an area-averaging filter when shrinking to avoid
-        aliasing on high-frequency/periodic content (see module docstring)."""
-        src_h, src_w = img.shape[:2]
-        shrinking = w < src_w or h < src_h
-        interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
-        return cv2.resize(img, (w, h), interpolation=interpolation)
+        """Resize to (w, h) with PIL's antialiased BILINEAR filter — the closest
+        match to the training pipeline's torchvision Resize(antialias=True); see
+        module docstring. Expects a uint8 HWC array (both call sites comply)."""
+        return np.asarray(Image.fromarray(img).resize((w, h), Image.BILINEAR))
 
     @classmethod
     def _dynamic_crop(cls, img: np.ndarray, threshold: float, padding: int) -> np.ndarray:

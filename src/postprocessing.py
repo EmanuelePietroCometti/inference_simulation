@@ -20,12 +20,12 @@ Two key differences from a naive per-image implementation:
    since some pixel always has to be the max) is a display-only quirk that never
    affects classification, which uses the separate absolute raw-score threshold.
 
-2. A Gaussian blur (kernel_size=25, sigma=4) is re-applied to the raw anomaly map.
-   The ONNX export disables this blur inside the graph (see export_onnx.py,
-   "GaussianBlur disabled for export... apply it in post-processing"), so it must
-   be replicated here to match model/supersimplenet.py's AnomalyMapGenerator,
-   otherwise heatmaps look noisy/blocky instead of the smooth blobs seen in
-   training visualizations.
+2. A Gaussian blur may be re-applied to the raw anomaly map, but ONLY for models
+   whose export leaves it out of the graph (SuperSimpleNet's export_onnx.py:
+   "GaussianBlur disabled for export... apply it in post-processing", kernel=25
+   sigma=4; legacy SK-RD4AD contract-1.0 exports). SK-RD4AD contract-2.0 models
+   bake the canonical blur INTO the graph: for those the host applies no blur at
+   all (src/model_config.py resolves this from the metadata and disables it).
 """
 
 import numpy as np

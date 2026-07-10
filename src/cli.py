@@ -48,15 +48,17 @@ def parse_args() -> argparse.Namespace:
                          choices=["auto", "graph", "map_max_blurred"],
                          help="Where the image-level anomaly score comes from. 'auto' (default) "
                               "reads it from the ONNX model's embedded metadata. 'graph' uses the "
-                              "graph's anomaly_score output directly (SuperSimpleNet: a dedicated "
-                              "classification head). 'map_max_blurred' derives it from the max of "
-                              "the blurred anomaly map (SK-RD4AD: eval.py calibrates its threshold "
-                              "this way, NOT on the graph's raw anomaly_score output). Getting this "
-                              "wrong silently produces a real but uncalibrated number - it will not "
-                              "crash, so 'auto' should be preferred unless you have a specific reason.")
+                              "graph's anomaly_score output directly (SuperSimpleNet's dedicated "
+                              "classification head, and SK-RD4AD contract-2.0 exports where the "
+                              "canonical blur+score are baked into the graph). 'map_max_blurred' "
+                              "derives it from the max of the host-blurred map (legacy SK-RD4AD "
+                              "contract-1.0 exports only). Getting this wrong silently produces a "
+                              "real but uncalibrated number - it will not crash, so 'auto' should "
+                              "be preferred unless you have a specific reason.")
     parser.add_argument("--no_blur", action="store_true",
-                         help="Disable the post-processing Gaussian blur (use if your ONNX export "
-                              "already includes it inside the graph).")
+                         help="Disable the host-side post-processing Gaussian blur. Not needed for "
+                              "contract-2.0 models (in-graph blur is auto-detected and host blur "
+                              "already disabled); only relevant for legacy exports.")
 
     parser.add_argument("--normalize", type=str, default="auto",
                          choices=["auto", "threshold", "per_image", "folder"],
