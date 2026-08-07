@@ -57,6 +57,54 @@ _LEGACY_FALLBACK = RuntimeConfig(
 )
 
 
+def _from_export_contract(metadata: dict) -> RuntimeConfig:
+    """Translate the standalone ``anomaly_export`` package's metadata contract
+    (``contract_version``) into this runtime's RuntimeConfig.
+
+    That package (SuperSimpleNet / SK-RD4AD / PatchCore / EfficientAD, one rigid
+    I/O contract) always emits the FINAL image score on the ``anomaly_score``
+    output and the FINAL map on ``anomaly_map`` — any Gaussian blur is baked into
+    the graph (``blur_applied=true``) or intentionally absent (EfficientAD,
+    ``blur_applied=false``). In every case the host must add NO blur and must
+    threshold the graph's ``anomaly_score`` directly, i.e. score_source="graph".
+
+    The package's own ``score_source`` values (classification_head / map_max /
+    reweighted_nn_distance) describe how the graph computed the score internally;
+    they all collapse to "graph" from this runtime's point of view. An unknown
+    value is a hard error: it means a newer export contract this runtime has not
+    been taught to read.
+    """
+    architecture = metadata.get("architecture") or metadata.get("model_name", "unknown")
+    export_source = metadata.get("score_source", "")
+    if export_source not in ("classification_head", "map_max", "reweighted_nn_distance"):
+        die(f"Unrecognized score_source '{export_source}' for anomaly_export "
+            f"contract_version {metadata.get('contract_version', '?')}: this runtime "
+            f"does not know how to score it. Update the runtime rather than guess a "
+            f"convention no threshold was calibrated against.")
+
+    blur_applied = str(metadata.get("blur_applied", "false")).lower() == "true"
+    # Provenance only: the host never re-applies these (blur is in the graph).
+    bk = int(float(metadata.get("blur_kernel_size", 0) or 0))
+    bs = float(metadata.get("blur_sigma", 0.0) or 0.0)
+
+    log(f"Auto-configured from anomaly_export contract_version "
+        f"{metadata.get('contract_version', '?')}: architecture={architecture}, "
+        f"export score_source={export_source} -> runtime score_source=graph, "
+        f"blur={'baked in graph (k=%d, sigma=%g)' % (bk, bs) if blur_applied else 'none (EfficientAD)'}, "
+        f"host-side blur disabled.")
+    if str(metadata.get("normalize_inside_graph", "")).lower() != "true":
+        log("WARNING: anomaly_export contract without normalize_inside_graph=true; "
+            "verify host preprocessing matches this model's expected input.")
+
+    return RuntimeConfig(
+        score_source="graph", blur_kernel_size=0, blur_sigma=0.0,
+        architecture=architecture,
+        # The export runs a PyTorch-vs-ONNXRuntime numeric parity check at export
+        # time, so the graph's numbers are trustworthy for the contract it declares.
+        verified=True, blur_in_graph=True,
+    )
+
+
 def resolve_runtime_config(metadata: dict, args) -> RuntimeConfig:
     # Hard stop for export-pipeline test artifacts. A --self_test export contains
     # RANDOM (untrained) weights: for reconstruction-based models the anomaly map
@@ -74,7 +122,28 @@ def resolve_runtime_config(metadata: dict, args) -> RuntimeConfig:
     if "weights_source" in metadata:
         log(f"Model weights source: {metadata['weights_source']}")
 
+    # Two distinct metadata contracts can appear:
+    #   - "anomaly_export_contract": this runtime's own native export scripts.
+    #   - "contract_version": the standalone anomaly_export package (4 architectures,
+    #     one rigid contract). Translated by _from_export_contract.
     has_metadata = "anomaly_export_contract" in metadata
+    has_export_contract = "contract_version" in metadata
+
+    if has_export_contract and not has_metadata:
+        base = _from_export_contract(metadata)
+        # CLI overrides (blur/score_source) are applied by the shared tail below.
+        score_source = args.score_source if args.score_source != "auto" else base.score_source
+        if base.blur_in_graph and (args.blur_kernel_size is not None or args.blur_sigma is not None):
+            log("WARNING: --blur_kernel_size/--blur_sigma IGNORED: this model's blur "
+                "is baked into the graph; applying another host-side blur would "
+                "invalidate the calibrated threshold.")
+        if score_source not in ("graph", "map_max_blurred"):
+            die(f"Unrecognized --score_source '{score_source}'.")
+        return RuntimeConfig(
+            score_source=score_source, blur_kernel_size=base.blur_kernel_size,
+            blur_sigma=base.blur_sigma, architecture=base.architecture,
+            verified=base.verified, blur_in_graph=base.blur_in_graph,
+        )
 
     if not has_metadata:
         log("WARNING: this ONNX model has no embedded architecture metadata "

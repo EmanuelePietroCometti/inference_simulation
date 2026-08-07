@@ -60,6 +60,20 @@ def parse_args() -> argparse.Namespace:
                               "contract-2.0 models (in-graph blur is auto-detected and host blur "
                               "already disabled); only relevant for legacy exports.")
 
+    parser.add_argument("--dynamic_crop", type=str, default="auto", choices=["auto", "on", "off"],
+                         help="SK-RD4AD content-dependent object crop applied before the encoder. "
+                              "'auto' (default) reads the model's 'dynamic_crop' metadata. The "
+                              "anomaly_export package does NOT emit this key (the crop is data-"
+                              "dependent and deliberately left out of the graph), so for SK-RD4AD "
+                              "exports from that package you must pass --dynamic_crop on, or scores "
+                              "come back nearly uniform (~0.999) for every image. 'off' forces it off.")
+    parser.add_argument("--dynamic_crop_bg_threshold", type=float, default=None,
+                         help="Background test for the dynamic crop (mean pixel intensity in [0,1] "
+                              "below which a pixel is foreground). Default: model metadata or 0.94.")
+    parser.add_argument("--dynamic_crop_padding", type=int, default=None,
+                         help="Padding (px) added around the detected object bounding box before "
+                              "rescaling to the full frame. Default: model metadata or 30.")
+
     parser.add_argument("--normalize", type=str, default="auto",
                          choices=["auto", "threshold", "per_image", "folder"],
                          help="Heatmap DISPLAY normalization (never affects the OK/ANOMALY verdict). "

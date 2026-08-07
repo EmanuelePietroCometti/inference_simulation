@@ -2,13 +2,20 @@
 Image preprocessing.
 
 The exact preprocessing required depends on how the ONNX model was exported:
-  - Newer export pipeline: input is uint8 HWC, RGB, normalization is done inside the graph.
-  - Older / default pipeline: input is float32 CHW, normalized here using ImageNet
-    statistics (matches the training preprocessing in datamodules/base/datamodule.py).
+  - uint8 HWC pipeline: input is uint8 HWC, RGB, ALL scaling+normalization is done
+    inside the graph.
+  - float32 CHW, normalization INSIDE the graph (anomaly_export contract): input is
+    float32 CHW, RGB, scaled to [0,1]; the graph applies mean/std itself. The host
+    must scale to [0,1] but MUST NOT apply mean/std, or the input is normalized
+    twice. Signalled by ``normalize_inside_graph=true`` in the model metadata.
+  - float32 CHW, normalization on the HOST (legacy default): input is float32 CHW,
+    normalized here using ImageNet statistics (matches the training preprocessing
+    in datamodules/base/datamodule.py); the graph does no normalization.
 
-Since both variants exist across export scripts used in this project, the Preprocessor
-inspects the ONNX model's input dtype at runtime and automatically selects the matching
-mode, logging the decision so it is always visible which one was used for a given run.
+Since all three variants exist across export scripts used in this project, the
+Preprocessor inspects the ONNX model's input dtype AND its ``normalize_inside_graph``
+metadata at runtime and automatically selects the matching mode, logging the decision
+so it is always visible which one was used for a given run.
 
 Resize / anti-aliasing
 -----------------------
@@ -72,17 +79,28 @@ class Preprocessor:
         self.onnx_dtype = input_meta.type
         self.onnx_shape = input_meta.shape
 
+        metadata = metadata or {}
+        # Does the GRAPH apply mean/std normalization itself? The anomaly_export
+        # contract puts mean/std inside the graph (normalize_inside_graph=true) and
+        # expects a float32 [0,1] input; applying ImageNet stats again on the host
+        # would normalize twice and silently corrupt every score.
+        normalize_inside_graph = str(metadata.get("normalize_inside_graph", "")).lower() == "true"
+
         self.image_size = self._resolve_image_size(self.onnx_shape)
-        self.mode = self._resolve_mode(self.onnx_dtype)
+        self.mode = self._resolve_mode(self.onnx_dtype, normalize_inside_graph)
 
         log(f"Model input '{self.input_name}': dtype={self.onnx_dtype}, shape={self.onnx_shape}")
         log(f"Preprocessing mode auto-selected: {self.mode} | target size (H, W): {self.image_size}")
-        if self.mode == "float32_chw_imagenet":
-            log("NOTE: input is float32, assuming ImageNet mean/std normalization "
-                "(matches the training pipeline). If this specific model was exported "
-                "with different preprocessing, results will be incorrect.")
-
-        metadata = metadata or {}
+        if self.mode == "float32_chw_raw01":
+            log("NOTE: input is float32 and the graph declares normalize_inside_graph=true "
+                "(anomaly_export contract): host scales to [0,1] only, mean/std is applied "
+                "INSIDE the graph. Host-side ImageNet normalization is intentionally skipped "
+                "to avoid double normalization.")
+        elif self.mode == "float32_chw_imagenet":
+            log("NOTE: input is float32 with no normalize_inside_graph flag, assuming "
+                "host-side ImageNet mean/std normalization (matches the legacy training "
+                "pipeline). If this specific model was exported with different "
+                "preprocessing, results will be incorrect.")
         self.dynamic_crop_enabled = metadata.get("dynamic_crop") == "true"
         self.dynamic_crop_threshold = float(metadata.get("dynamic_crop_bg_threshold", 0.94))
         self.dynamic_crop_padding = int(metadata.get("dynamic_crop_padding", 30))
@@ -99,9 +117,11 @@ class Preprocessor:
         return DEFAULT_IMAGE_SIZE
 
     @staticmethod
-    def _resolve_mode(dtype: str) -> str:
+    def _resolve_mode(dtype: str, normalize_inside_graph: bool) -> str:
         if "uint8" in dtype:
             return "uint8_hwc_ingraph"
+        if normalize_inside_graph:
+            return "float32_chw_raw01"
         return "float32_chw_imagenet"
 
     @staticmethod
@@ -162,8 +182,12 @@ class Preprocessor:
             return np.expand_dims(tensor, axis=0)  # (1, H, W, 3)
 
         img_float = img_resized.astype(np.float32) / 255.0
-        img_norm = (img_float - IMAGENET_MEAN) / IMAGENET_STD
-        img_chw = img_norm.transpose(2, 0, 1)
+        # ImageNet mean/std ONLY when the graph does not normalize itself; for the
+        # anomaly_export contract (float32_chw_raw01) the graph applies mean/std, so
+        # the host stops at [0,1] to avoid normalizing the input twice.
+        if self.mode == "float32_chw_imagenet":
+            img_float = (img_float - IMAGENET_MEAN) / IMAGENET_STD
+        img_chw = img_float.transpose(2, 0, 1)
         return np.expand_dims(img_chw, axis=0).astype(np.float32)  # (1, 3, H, W)
 
     def load_original_bgr(self, image_path: str) -> np.ndarray:

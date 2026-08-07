@@ -18,7 +18,7 @@ All logic lives in the src/ package; this file only wires the modules together.
 import cv2
 
 from src.cli import parse_args
-from src.utils import log, list_images, ensure_dir
+from src.utils import log, die, list_images, ensure_dir
 from src.provider_setup import build_providers
 from src.inference_engine import AnomalyInferenceEngine
 from src.raw_cache import save_raw, load_raw, cleanup as cleanup_cache
@@ -138,7 +138,33 @@ def main() -> None:
         calibration_table=args.calibration_table,
     )
 
-    engine = AnomalyInferenceEngine(args.model, providers)
+    # CLI overrides for preprocessing metadata the model may not embed (notably the
+    # SK-RD4AD dynamic crop, which the anomaly_export contract deliberately keeps out
+    # of the graph). Only non-None entries win over the model's own metadata.
+    preproc_overrides = {}
+    if args.dynamic_crop != "auto":
+        preproc_overrides["dynamic_crop"] = "true" if args.dynamic_crop == "on" else "false"
+    if args.dynamic_crop_bg_threshold is not None:
+        preproc_overrides["dynamic_crop_bg_threshold"] = str(args.dynamic_crop_bg_threshold)
+    if args.dynamic_crop_padding is not None:
+        preproc_overrides["dynamic_crop_padding"] = str(args.dynamic_crop_padding)
+
+    engine = AnomalyInferenceEngine(args.model, providers, preproc_overrides=preproc_overrides)
+
+    # INT8 safety guard. Some architectures declare quantization_safe=false in their
+    # metadata (notably PatchCore: INT8-quantizing the nearest-neighbour distance
+    # nodes destroys the distance ranking, silently producing meaningless scores that
+    # still look plausible). Refuse before building the TensorRT INT8 engine - a
+    # garbage benchmark is worse than a clear stop. Checked here (not in
+    # build_providers) because it needs the model's embedded metadata, and the TRT
+    # INT8 engine is only built lazily on the first inference run, still ahead of us.
+    if args.precision == "int8" and str(engine.metadata.get("quantization_safe", "")).lower() == "false":
+        die(f"This model declares quantization_safe=false (architecture "
+            f"{engine.metadata.get('architecture', 'unknown')}): INT8 quantization would "
+            f"corrupt its scores (e.g. PatchCore's nearest-neighbour distance ranking). "
+            f"Re-run with --precision fp16 or fp32, or export a variant with the NN "
+            f"nodes excluded from INT8 quantization.")
+
     image_paths = list_images(args.input_dir, args.extension)
 
     runtime_config = resolve_runtime_config(engine.metadata, args)
@@ -160,6 +186,16 @@ def main() -> None:
         threshold = float(engine.metadata["calibrated_threshold"])
         threshold_source = (f"embedded calibration "
                             f"({engine.metadata.get('calibration_info', 'no info')})")
+    elif (str(engine.metadata.get("calibrated", "")).lower() == "true"
+          and "image_threshold_raw" in engine.metadata):
+        # anomaly_export contract: the RAW image-level threshold lives in
+        # image_threshold_raw (raw score units, directly comparable to the graph's
+        # anomaly_score). image_threshold_norm is the [0,1] version, not used here
+        # because this runtime thresholds on the RAW score.
+        threshold = float(engine.metadata["image_threshold_raw"])
+        threshold_source = (f"embedded anomaly_export calibration (image_threshold_raw, "
+                            f"method={engine.metadata.get('calibration_method', '?')}, "
+                            f"dataset={engine.metadata.get('calibration_dataset', '?')})")
     else:
         # No sensible fixed default exists in raw-score units (they are unbounded
         # and model-specific), so fall back to the midpoint of the folder's raw

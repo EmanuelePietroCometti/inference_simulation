@@ -11,7 +11,7 @@ from src.utils import log, die
 class AnomalyInferenceEngine:
     """Loads the ONNX model and exposes a simple preprocess + run interface."""
 
-    def __init__(self, model_path: str, providers: list):
+    def __init__(self, model_path: str, providers: list, preproc_overrides: dict | None = None):
         try:
             self.session = ort.InferenceSession(model_path, providers=providers)
         except Exception as e:
@@ -24,7 +24,13 @@ class AnomalyInferenceEngine:
         # by the export script; see src/model_config.py and preprocessing.py.
         self.metadata = dict(self.session.get_modelmeta().custom_metadata_map)
 
-        self.preprocessor = Preprocessor(self.session, self.metadata)
+        # self.metadata stays pristine (model_config reads it); preprocessing gets a
+        # merged view where CLI overrides (e.g. forcing SK-RD4AD's dynamic crop, which
+        # the anomaly_export contract does not embed) win over the model's own keys.
+        preproc_meta = dict(self.metadata)
+        if preproc_overrides:
+            preproc_meta.update({k: v for k, v in preproc_overrides.items() if v is not None})
+        self.preprocessor = Preprocessor(self.session, preproc_meta)
         self.input_name = self.preprocessor.input_name
 
         output_names = [o.name for o in self.session.get_outputs()]
