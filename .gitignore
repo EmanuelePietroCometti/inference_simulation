@@ -219,3 +219,6 @@ __marimo__/
 images/
 results/
 trt_engines/
+models/
+reda/
+output/
