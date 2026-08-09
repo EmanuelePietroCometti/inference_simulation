@@ -19,6 +19,9 @@ def _format_summary_txt(summary: dict) -> str:
     lines.append("-" * 45)
     for batch_size, stats in summary.get("batch_throughput_comparison", {}).items():
         lines.append(f"BATCH SIZE {batch_size}:")
+        if stats.get("oom"):
+            lines.append("  OUT OF MEMORY - batch size skipped")
+            continue
         lines.append(f"  Avg time per batch: {stats['avg_time_per_batch_ms']:.2f} ms")
         lines.append(f"  Avg time per image: {stats['avg_time_per_image_ms']:.2f} ms")
         if "speedup_vs_batch1" in stats:

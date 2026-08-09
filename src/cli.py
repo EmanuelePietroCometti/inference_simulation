@@ -1,101 +1,67 @@
-"""Command-line argument parsing for the SuperSimpleNet inference script."""
+"""Command-line argument parsing for the anomaly-detection inference/benchmark script."""
 
 import argparse
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run SuperSimpleNet ONNX inference on a folder of images, save anomaly "
-                     "heatmaps normalized like the training pipeline, and benchmark batch 1 vs batch 17."
+        description="Run anomaly-detection ONNX inference on a folder of images (contract-driven, "
+                    "matching the C++ engine), save heatmap overlays, and benchmark batch 1 vs 17 "
+                    "at the requested precision (fp32/fp16/int8)."
     )
 
     parser.add_argument("--model", type=str, required=True,
-                         help="Path to the ONNX model (FP32 model; TensorRT handles FP16/INT8 "
-                              "conversion internally, no pre-quantized model required).")
+                        help="Path to the ONNX model (FP32 model; TensorRT handles FP16/INT8 "
+                             "conversion internally, no pre-quantized model required).")
     parser.add_argument("--input_dir", type=str, required=True,
-                         help="Folder containing the input images to run inference on.")
+                        help="Folder containing the input images to run inference on.")
     parser.add_argument("--output_dir", type=str, default="./inference_results",
-                         help="Folder where heatmaps and result files will be saved.")
+                        help="Folder where heatmaps and result files will be saved.")
     parser.add_argument("--extension", type=str, default=".bmp",
-                         help="File extension of the input images (default: .bmp).")
+                        help="File extension of the input images (default: .bmp).")
 
-    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "tensorrt"],
-                         help="Execution provider to use.")
+    parser.add_argument("--device", type=str, default="tensorrt", choices=["cpu", "cuda", "tensorrt"],
+                        help="Execution provider to use. Default: tensorrt, listed as "
+                             "TensorRT->CUDA->CPU so ONNX Runtime falls back between EPs within one "
+                             "session (see src/provider_setup.py).")
     parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "fp16", "int8"],
-                         help="Precision requested from TensorRT (ignored for cpu/cuda).")
+                        help="Precision requested from TensorRT (ignored for cpu/cuda).")
     parser.add_argument("--calibration_table", type=str, default=None,
-                         help="Path to the native TensorRT INT8 calibration cache. "
-                              "Required when --precision int8, generated with a dedicated calibration script.")
+                        help="Path to the native TensorRT INT8 calibration cache. "
+                             "Required when --precision int8.")
     parser.add_argument("--engine_cache_dir", type=str, default="./trt_engines",
-                         help="Directory where TensorRT engines are cached between runs.")
+                        help="Directory where TensorRT engines are cached between runs "
+                             "(namespaced per precision).")
 
     parser.add_argument("--threshold", type=float, default=None,
-                         help="ABSOLUTE anomaly-score threshold in the model's RAW score units. "
-                              "If omitted, the runtime uses the 'calibrated_threshold' embedded "
-                              "in the model by calibrate_threshold.py --embed; if the model has "
-                              "none, it falls back to the folder raw-score midpoint (unreliable, "
-                              "logged with a warning).")
+                        help="ABSOLUTE anomaly-score threshold in the model's RAW score units. "
+                             "If omitted, the embedded image_threshold_raw (calibration contract) "
+                             "is used, exactly like the C++ engine.")
 
-    parser.add_argument("--blur_kernel_size", type=int, default=None,
-                         help="Gaussian blur kernel size applied to the raw anomaly map before "
-                              "display/scoring. Default: auto-detected from the ONNX model's "
-                              "embedded metadata (see src/model_config.py). Pass explicitly only "
-                              "to override the model's own declared value.")
-    parser.add_argument("--blur_sigma", type=float, default=None,
-                         help="Gaussian blur sigma. Default: auto-detected from the ONNX model's "
-                              "metadata. 0 lets OpenCV derive sigma from the kernel size.")
-    parser.add_argument("--score_source", type=str, default="auto",
-                         choices=["auto", "graph", "map_max_blurred"],
-                         help="Where the image-level anomaly score comes from. 'auto' (default) "
-                              "reads it from the ONNX model's embedded metadata. 'graph' uses the "
-                              "graph's anomaly_score output directly (SuperSimpleNet's dedicated "
-                              "classification head, and SK-RD4AD contract-2.0 exports where the "
-                              "canonical blur+score are baked into the graph). 'map_max_blurred' "
-                              "derives it from the max of the host-blurred map (legacy SK-RD4AD "
-                              "contract-1.0 exports only). Getting this wrong silently produces a "
-                              "real but uncalibrated number - it will not crash, so 'auto' should "
-                              "be preferred unless you have a specific reason.")
-    parser.add_argument("--no_blur", action="store_true",
-                         help="Disable the host-side post-processing Gaussian blur. Not needed for "
-                              "contract-2.0 models (in-graph blur is auto-detected and host blur "
-                              "already disabled); only relevant for legacy exports.")
-
-    parser.add_argument("--dynamic_crop", type=str, default="auto", choices=["auto", "on", "off"],
-                         help="SK-RD4AD content-dependent object crop applied before the encoder. "
-                              "'auto' (default) reads the model's 'dynamic_crop' metadata. The "
-                              "anomaly_export package does NOT emit this key (the crop is data-"
-                              "dependent and deliberately left out of the graph), so for SK-RD4AD "
-                              "exports from that package you must pass --dynamic_crop on, or scores "
-                              "come back nearly uniform (~0.999) for every image. 'off' forces it off.")
-    parser.add_argument("--dynamic_crop_bg_threshold", type=float, default=None,
-                         help="Background test for the dynamic crop (mean pixel intensity in [0,1] "
-                              "below which a pixel is foreground). Default: model metadata or 0.94.")
-    parser.add_argument("--dynamic_crop_padding", type=int, default=None,
-                         help="Padding (px) added around the detected object bounding box before "
-                              "rescaling to the full frame. Default: model metadata or 30.")
-
-    parser.add_argument("--normalize", type=str, default="auto",
-                         choices=["auto", "threshold", "per_image", "folder"],
-                         help="Heatmap DISPLAY normalization (never affects the OK/ANOMALY verdict). "
-                              "'auto' (default): 'threshold' when a calibrated/user threshold exists, "
-                              "else 'per_image'. 'threshold': eval.py-style threshold-centric coloring "
-                              "- below-threshold pixels stay cold, above-threshold render warm; the "
-                              "cleanest view, background noise stays blue. 'per_image': each image's "
-                              "own min-max (defect stands out, but the noise floor gets stretched -> "
-                              "speckled background). 'folder': folder-wide min/max (cross-image "
-                              "comparable brightness, can wash out narrow raw ranges).")
     parser.add_argument("--colormap", type=str, default="JET",
-                         choices=["JET", "TURBO", "INFERNO", "HOT"],
-                         help="OpenCV colormap used to render the anomaly heatmap.")
+                        choices=["JET", "TURBO", "INFERNO", "HOT"],
+                        help="OpenCV colormap used to render the anomaly heatmap.")
     parser.add_argument("--overlay_alpha", type=float, default=0.5,
-                         help="Blending factor between the heatmap and the original image "
-                              "(0 = only original image, 1 = only heatmap).")
+                        help="Blending factor between the heatmap and the original image "
+                             "(0 = only original image, 1 = only heatmap).")
 
     parser.add_argument("--batch_sizes", type=str, default="1,17",
-                         help="Comma-separated batch sizes to benchmark, e.g. '1,17'.")
+                        help="Comma-separated batch sizes to benchmark, e.g. '1,17'.")
     parser.add_argument("--warmup_iters", type=int, default=5,
-                         help="Warm-up iterations before timing each batch size.")
+                        help="Warm-up iterations before timing each batch size.")
     parser.add_argument("--timed_iters", type=int, default=20,
-                         help="Timed iterations used to measure throughput for each batch size.")
+                        help="Timed iterations used to measure throughput for each batch size.")
+
+    # OOM controls (see src/provider_setup.py).
+    parser.add_argument("--gpu_mem_limit", type=int, default=None,
+                        help="Optional CUDA/TensorRT memory cap in BYTES. Default: unset "
+                             "(ORT uses the device's available VRAM). Set only to constrain usage.")
+    parser.add_argument("--trt_workspace_gb", type=float, default=4.0,
+                        help="TensorRT builder workspace size in GB (default: 4).")
+    parser.add_argument("--trt_opt_batch", type=int, default=None,
+                        help="Batch size TensorRT optimizes the engine for (profile 'opt' shape). "
+                             "Default: the smallest requested batch, which keeps the engine BUILD "
+                             "feasible (optimizing for large batches can need tens of GB and fail, "
+                             "e.g. PatchCore). Larger batches still run and are skipped if they OOM.")
 
     return parser.parse_args()
