@@ -55,7 +55,6 @@ def _profile_shapes(input_name: str, batch_sizes: list, channels: int, height: i
 
 def _cuda_options(gpu_mem_limit: int | None) -> dict:
     opts = {
-        "device_id": 0,
         "arena_extend_strategy": "kSameAsRequested",  # grow only as needed, avoids over-reserving
         "cudnn_conv_algo_search": "EXHAUSTIVE",
         "cudnn_conv_use_max_workspace": "1",  # let cuDNN pick the fastest conv algo (C++ parity)
@@ -81,13 +80,17 @@ def build_session_plans(device: str, precision: str, engine_cache_dir: str,
     cpu_plan = {"label": "CPU", "providers": ["CPUExecutionProvider"]}
 
     if device == "tensorrt":
-        # Namespace the engine cache per precision so fp16/int8/fp32 engines,
-        # which are not interchangeable, never overwrite each other.
-        cache_dir = os.path.abspath(os.path.join(engine_cache_dir, precision))
-        os.makedirs(cache_dir, exist_ok=True)
-
         min_shapes, opt_shapes, max_shapes, bopt = _profile_shapes(
             input_name, batch_sizes, input_channels, input_height, input_width, trt_opt_batch)
+
+        # Namespace the engine cache per precision (fp16/int8/fp32 engines are not
+        # interchangeable) AND per opt batch, so a static per-batch engine
+        # (min=opt=max=b) never collides with another batch's engine. The timing
+        # cache stays at the precision level so all batches share tactic-timing
+        # knowledge and rebuild faster.
+        precision_dir = os.path.abspath(os.path.join(engine_cache_dir, precision))
+        cache_dir = os.path.join(precision_dir, f"opt{bopt}")
+        os.makedirs(cache_dir, exist_ok=True)
 
         # TensorRT EP tuned like the C++ OrtsessionConfig.cpp: device 0, FP16/INT8
         # kernels, engine + timing caches, aggressive builder search, and a single
@@ -97,8 +100,8 @@ def build_session_plans(device: str, precision: str, engine_cache_dir: str,
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": cache_dir,
             "trt_timing_cache_enable": True,
-            "trt_timing_cache_path": os.path.join(cache_dir, "trt_timing_cache"),
-            "trt_builder_optimization_level": 5,
+            "trt_timing_cache_path": os.path.join(precision_dir, "trt_timing_cache"),
+            "trt_builder_optimization_level": 3,
             "trt_max_workspace_size": int(trt_workspace_gb * 1024 * 1024 * 1024),
             "trt_fp16_enable": precision == "fp16",
             "trt_int8_enable": precision == "int8",

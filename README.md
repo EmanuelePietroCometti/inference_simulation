@@ -19,7 +19,39 @@ For every image in a folder it:
    with defect contours drawn at `pixel_threshold_raw` (same as the C++ engine).
 
 Then it benchmarks raw inference throughput at **batch size 1 and 17** (default)
-at the requested precision. Timing wraps `session.run` only (no pre/post-processing).
+at the requested precision. Timing wraps `session.run` only (no pre/post-processing),
+and reports **mean / median / std / p95 / p99 / min** per-batch times plus
+throughput (img/s) — not just the average, so the latency *tail* (what matters for
+inspection) is visible.
+
+> **Latency caveat.** These are Python `session.run` latencies: they include the
+> host↔device input/output copies that the C++ engine avoids with `Ort::IoBinding`
+> + pinned memory. Treat them as an **upper bound** on production latency, not the
+> production latency itself (each record carries a `latency_note` to this effect).
+
+### Deterministic correctness vs fast throughput
+
+The classification pass runs with **deterministic** kernels so scores are
+reproducible. The throughput benchmark runs on a **separate, non-deterministic**
+session by default, so the speed number is not penalized by a reproducibility
+setting production would not use. Pass `--throughput_deterministic` to force one
+fully-reproducible speed number instead.
+
+### Reproducibility: environment + EP partition
+
+Every report header records the **environment** (GPU name/VRAM/driver/clocks,
+ORT/TensorRT/CUDA/onnx/numpy/python versions, OS, git commit) so a timing is never
+orphaned from the machine it ran on. For stable numbers, lock the GPU clocks first:
+
+```bash
+nvidia-smi -lgc <min>,<max>      # e.g. nvidia-smi -lgc 2100,2100 ; reset with -rgc
+```
+
+Pass `--profile_ep` to add a **per-EP partition** to the report: it runs one
+profiled inference and reports how many nodes (and how much kernel time) actually
+ran on TensorRT vs CUDA vs CPU. This surfaces *partial fallback* that
+`active_providers` hides — the likely explanation when two same-backbone models
+(e.g. SuperSimpleNet vs SK-RD4AD) time very differently.
 
 ## Alignment with the C++ engine
 
@@ -50,11 +82,31 @@ range without a per-shape rebuild.
 
 The provider list is `[TensorRT, CUDA, CPU]`, so ONNX Runtime applies its native
 **TensorRT → CUDA → CPU** fallback *within a single session*: a subgraph TensorRT
-cannot build/run drops to CUDA, then CPU — mirroring the C++ cascade. The
-optimization (`opt`) profile shape defaults to the smallest requested batch
-(`--trt_opt_batch` to override) to keep the engine build feasible on large models.
+cannot build/run drops to CUDA, then CPU — mirroring the C++ cascade. The input name
+and C/H/W dims that seed the dynamic-batch profile are read **from the ONNX graph**
+(`src/onnx_introspect.py`) before the engine is built, so the profile can never
+reference a wrong/guessed input.
 
 Select a different backend explicitly with `--device cuda` or `--device cpu`.
+
+### Batch benchmark: one optimized engine per batch (default)
+
+TensorRT tunes its kernel tactics for the profile's **`opt`** shape, so a single
+engine built with `opt=1` and then run at batch 17 uses batch-1 tactics — its
+measured scaling would be partly a build artifact, not the architecture.
+
+This harness sidesteps that entirely. **By default each batch size is timed on its
+own static-shape engine** (`min=opt=max=batch`), so every number is that batch's
+*best achievable* throughput and there is **no target to specify**. Engines are
+built once, cached on disk (namespaced per batch under `--engine_cache_dir`), and
+released between batches so a large batch is not starved of VRAM. A per-batch engine
+that OOMs *at build* (e.g. PatchCore autotuning a large static batch) is reported as
+`oom (build)` and skipped — that batch would also OOM at runtime.
+
+Pass **`--trt_opt_batch <b>`** only for the alternative **shared-engine /
+production-parity** mode: one engine over the whole range, optimized for `b`,
+mirroring how the C++ runtime serves every batch from a single engine. In that mode
+batches ≠ `b` run with non-optimal tactics (by design).
 
 ## OOM behaviour and the batch-size / VRAM trade-off
 
@@ -112,8 +164,16 @@ python main.py \
 
 Key flags: `--threshold` (override the embedded `image_threshold_raw`),
 `--precision` (fp32/fp16/int8), `--colormap`, `--overlay_alpha`, `--warmup_iters`,
-`--timed_iters`, `--gpu_mem_limit`, `--trt_workspace_gb`, `--trt_opt_batch`,
-`--calibration_table` (INT8).
+`--timed_iters` (default 100), `--gpu_mem_limit`, `--trt_workspace_gb`,
+`--trt_opt_batch` (switch to shared/production-parity mode; see above),
+`--calibration_table` (INT8),
+`--throughput_deterministic`, `--profile_ep`, `--expected_count` (dataset integrity
+check), `--extension` (comma-separated, e.g. `.bmp,.png`).
+
+Robustness: an unreadable/corrupt image is skipped and logged (the run is not
+aborted and produced heatmaps are not lost); with `--expected_count` a found-vs-
+expected mismatch is flagged, which is how an "expected N, found M" discrepancy
+surfaces.
 
 Outputs land in `--output_dir`: `heatmaps/`, `benchmark_results.txt`,
 `benchmark_results.json`, `per_image_results.csv`.

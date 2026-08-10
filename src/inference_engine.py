@@ -18,11 +18,18 @@ from src.utils import log, die
 class AnomalyInferenceEngine:
     """Loads the ONNX model and exposes a simple preprocess + run interface."""
 
-    def __init__(self, model_path: str, session_plans: list):
+    def __init__(self, model_path: str, session_plans: list, deterministic: bool = True):
+        # Correctness runs use deterministic kernels (reproducible scores); the
+        # throughput benchmark can turn this off so ORT/TensorRT are free to pick the
+        # fastest (possibly non-deterministic) kernels — otherwise the speed number
+        # is penalized by a reproducibility setting that production would not use.
+        self.deterministic = deterministic
+        self.model_path = model_path
         self.session = self._create_session_with_fallback(model_path, session_plans)
 
         active_providers = self.session.get_providers()
-        log(f"Model loaded successfully. Active execution providers: {active_providers}")
+        log(f"Model loaded successfully (deterministic={deterministic}). "
+            f"Active execution providers: {active_providers}")
 
         # Raw metadata (kept pristine) + parsed calibration contract.
         self.metadata = dict(self.session.get_modelmeta().custom_metadata_map)
@@ -36,14 +43,13 @@ class AnomalyInferenceEngine:
         log(f"Outputs -> anomaly_map: '{self.anomaly_map_name}', "
             f"anomaly_score: '{self.anomaly_score_name}'")
 
-    @staticmethod
-    def _make_session_options():
+    def _make_session_options(self):
         so = ort.SessionOptions()
         # Keep the arena off: batch 17 of the large backbones would otherwise
         # make the CPU arena reserve (and never release) a large block.
         so.enable_cpu_mem_arena = False
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        so.use_deterministic_compute = True
+        so.use_deterministic_compute = self.deterministic
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         return so
 

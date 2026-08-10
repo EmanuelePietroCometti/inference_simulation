@@ -18,7 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=str, default="./inference_results",
                         help="Folder where heatmaps and result files will be saved.")
     parser.add_argument("--extension", type=str, default=".bmp",
-                        help="File extension of the input images (default: .bmp).")
+                        help="File extension(s) of the input images, comma-separated "
+                             "(default: .bmp; e.g. '.bmp,.png').")
+    parser.add_argument("--expected_count", type=int, default=None,
+                        help="Expected number of input images. If set and the count "
+                             "differs, a WARNING is logged (dataset integrity check).")
 
     parser.add_argument("--device", type=str, default="tensorrt", choices=["cpu", "cuda", "tensorrt"],
                         help="Execution provider to use. Default: tensorrt, listed as "
@@ -46,22 +50,37 @@ def parse_args() -> argparse.Namespace:
                              "(0 = only original image, 1 = only heatmap).")
 
     parser.add_argument("--batch_sizes", type=str, default="1,17",
-                        help="Comma-separated batch sizes to benchmark, e.g. '1,17'.")
-    parser.add_argument("--warmup_iters", type=int, default=5,
+                        help="Comma-separated batch sizes to benchmark, e.g. '1,17' or "
+                             "'1,2,4,8,16,32' to trace the throughput knee.")
+    parser.add_argument("--warmup_iters", type=int, default=10,
                         help="Warm-up iterations before timing each batch size.")
-    parser.add_argument("--timed_iters", type=int, default=20,
-                        help="Timed iterations used to measure throughput for each batch size.")
+    parser.add_argument("--timed_iters", type=int, default=100,
+                        help="Timed iterations per batch size (>=100 recommended so "
+                             "percentiles are meaningful, especially for fast models).")
+    parser.add_argument("--throughput_deterministic", action="store_true",
+                        help="Keep deterministic kernels during the THROUGHPUT benchmark "
+                             "too. Default off: the benchmark session lets ORT/TensorRT pick "
+                             "the fastest kernels, while the correctness pass stays "
+                             "deterministic. Turn on for a fully reproducible speed number.")
+
+    parser.add_argument("--profile_ep", action="store_true",
+                        help="Run one profiled inference to report the per-EP node partition "
+                             "(TensorRT/CUDA/CPU) — reveals partial fallback.")
 
     # OOM controls (see src/provider_setup.py).
     parser.add_argument("--gpu_mem_limit", type=int, default=None,
                         help="Optional CUDA/TensorRT memory cap in BYTES. Default: unset "
                              "(ORT uses the device's available VRAM). Set only to constrain usage.")
-    parser.add_argument("--trt_workspace_gb", type=float, default=4.0,
+    parser.add_argument("--trt_workspace_gb", type=float, default=2.0,
                         help="TensorRT builder workspace size in GB (default: 4).")
     parser.add_argument("--trt_opt_batch", type=int, default=None,
-                        help="Batch size TensorRT optimizes the engine for (profile 'opt' shape). "
-                             "Default: the smallest requested batch, which keeps the engine BUILD "
-                             "feasible (optimizing for large batches can need tens of GB and fail, "
-                             "e.g. PatchCore). Larger batches still run and are skipped if they OOM.")
+                        help="Override the benchmark into SHARED-engine mode: build ONE TensorRT "
+                             "engine over the whole batch range, optimized for this 'opt' batch "
+                             "(production parity — one engine serves every batch). "
+                             "DEFAULT (flag unset): per-batch mode, where each batch is timed on "
+                             "its own static-shape engine (min=opt=max=batch), giving each batch's "
+                             "best achievable throughput with no opt-shape artifact and nothing to "
+                             "tune. A per-batch engine that OOMs at build (e.g. PatchCore at a large "
+                             "batch) is skipped, exactly like a runtime OOM.")
 
     return parser.parse_args()
