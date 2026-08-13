@@ -30,9 +30,9 @@ separately. Python follows the contract.)
 import numpy as np
 import cv2
 import onnxruntime as ort
-from PIL import Image
 
 from src.utils import log
+from src.antialias_resize import resize_antialias
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -88,10 +88,14 @@ class Preprocessor:
 
     @staticmethod
     def _resize(img: np.ndarray, w: int, h: int) -> np.ndarray:
-        """Resize to (w, h) with PIL's antialiased BILINEAR filter — matches the
-        model's ``preproc_resize_interpolation=bilinear``/``preproc_antialias=true``
-        metadata and the training pipeline. Expects a uint8 HWC array."""
-        return np.asarray(Image.fromarray(img).resize((w, h), Image.BILINEAR))
+        """Resize to width ``w`` x height ``h`` with the antialiased BILINEAR filter.
+
+        Uses the self-contained :func:`resize_antialias` (the SAME explicit
+        algorithm the C++ engine runs), not PIL/torchvision — so the Python
+        reference and the C++ production engine share one definition and can never
+        drift, and nothing depends on a third-party library's internals. Expects a
+        uint8 HWC (or HW) array; returns uint8."""
+        return resize_antialias(img, out_h=h, out_w=w)
 
     def __call__(self, image_path: str) -> np.ndarray:
         """Load and preprocess a single image, returning a batched (1, ...) array."""
