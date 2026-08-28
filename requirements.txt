@@ -1,3 +1,4 @@
 opencv-python
 numpy
-onnxruntime
+onnxruntime-gpu
+onnx
