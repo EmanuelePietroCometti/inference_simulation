@@ -71,8 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu_mem_limit", type=int, default=None,
                         help="Optional CUDA/TensorRT memory cap in BYTES. Default: unset "
                              "(ORT uses the device's available VRAM). Set only to constrain usage.")
-    parser.add_argument("--trt_workspace_gb", type=float, default=2.0,
-                        help="TensorRT builder workspace size in GB (default: 4).")
+    parser.add_argument("--trt_workspace_gb", type=float, default=12.0,
+                        help="TensorRT builder workspace size in GB (default: 12).")
     parser.add_argument("--trt_opt_batch", type=int, default=None,
                         help="Override the benchmark into SHARED-engine mode: build ONE TensorRT "
                              "engine over the whole batch range, optimized for this 'opt' batch "
